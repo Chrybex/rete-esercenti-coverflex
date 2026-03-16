@@ -316,7 +316,7 @@
       border:0;
       border-radius:12px;
       cursor:pointer;
-      background:var(--brand);;
+      background:var(--brand);
       color:#fff;
       white-space:nowrap;
     }
