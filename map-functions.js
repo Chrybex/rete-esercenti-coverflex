@@ -5,6 +5,15 @@
       attribution: "&copy; OpenStreetMap contributors",
     }).addTo(map);
 
+const searchIcon = L.icon({
+  iconUrl: "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png",
+  shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
+  iconSize: [25, 41],
+  iconAnchor: [12, 41],
+  popupAnchor: [1, -34],
+  shadowSize: [41, 41]
+});
+
     const cluster = L.markerClusterGroup({
       showCoverageOnHover: false
     });
@@ -632,15 +641,23 @@
       }
     }
 
-    function setSearchMarker(lat, lon, label) {
-      clearSearchMarker();
-      searchMarker = L.marker([lat, lon]).addTo(map);
-      map.setView([lat, lon], 16);
+function setSearchMarker(lat, lon, label) {
+  clearSearchMarker();
 
-      if (label) {
-        searchMarker.bindPopup(label).openPopup();
-      }
-    }
+  searchMarker = L.circleMarker([lat, lon], {
+    radius: 10,
+    weight: 3,
+    color: "#b91c1c",
+    fillColor: "#ef4444",
+    fillOpacity: 0.9
+  }).addTo(map);
+
+  map.setView([lat, lon], 16);
+
+  if (label) {
+    searchMarker.bindPopup(label).openPopup();
+  }
+}
 
     function buildPrimary(item) {
       const address = item.address || {};
