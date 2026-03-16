@@ -644,8 +644,12 @@ const searchIcon = L.icon({
 function setSearchMarker(lat, lon, label) {
   clearSearchMarker();
 
-  searchMarker = L.marker([lat, lon], {
-    icon: searchIcon
+  searchMarker = L.circleMarker([lat, lon], {
+    radius: 10,
+    color: "#b91c1c",
+    weight: 3,
+    fillColor: "#ef4444",
+    fillOpacity: 0.95
   }).addTo(map);
 
   map.setView([lat, lon], 16);
