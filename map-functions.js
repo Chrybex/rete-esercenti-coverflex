@@ -1,4 +1,5 @@
 const map = L.map("map", { scrollWheelZoom: true });
+
 L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 19,
   attribution: "&copy; OpenStreetMap contributors",
@@ -6,6 +7,8 @@ L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
 
 const cluster = L.markerClusterGroup({ showCoverageOnHover: false });
 cluster.addTo(map);
+
+let searchMarker = null;
 
 const els = {
   category: document.getElementById("category"),
@@ -17,6 +20,11 @@ const els = {
   ddRegion: document.getElementById("dd-region"),
   ddProvince: document.getElementById("dd-province"),
   ddCity: document.getElementById("dd-city"),
+
+  addressSearch: document.getElementById("address-search"),
+  addressSearchBtn: document.getElementById("address-search-btn"),
+  addressClearBtn: document.getElementById("address-clear-btn"),
+  addressResults: document.getElementById("address-results"),
 };
 
 const state = {
@@ -32,13 +40,15 @@ const state = {
   selectedCities: new Set(),
 
   groupsTouched: false,
+
+  searchResults: [],
+  activeSearchIndex: -1,
 };
 
 const norm = (s) => (s ?? "").toString().trim().toLowerCase();
 const provCode = (p) => (p?.address_district || "").toUpperCase().trim();
 const provRegion = (code) => (window.PROVINCE_INFO?.[code]?.region || "");
 
-// ✅ robust: se PROVINCE_INFO non è ancora pronto, non “rompo” la UI
 function provLabelSafe(code) {
   const info = window.PROVINCE_INFO?.[code];
   return info ? `${code} — ${info.name}` : code;
@@ -52,9 +62,11 @@ function groupValue(p) {
 function effectiveRegions() {
   return new Set([...state.manualRegions, ...state.derivedRegions]);
 }
+
 function hasManualScope() {
   return state.manualRegions.size > 0;
 }
+
 function inManualScope(region) {
   return !hasManualScope() || state.manualRegions.has(region);
 }
@@ -104,7 +116,7 @@ function popupHtml(p) {
 }
 
 // ----------------------------
-// Dropdown con ricerca (supporta renderLabel + hook onOpen)
+// Dropdown con ricerca
 // ----------------------------
 function createCheckboxDropdown(rootEl, opts) {
   const labelOf = (v) => (opts.renderLabel ? opts.renderLabel(v) : v);
@@ -220,7 +232,6 @@ function createCheckboxDropdown(rootEl, opts) {
     getSelected() {
       return [...selected];
     },
-    // ✅ utile: forzo re-render (per province label)
     refresh() {
       updateHead();
       render();
@@ -283,7 +294,7 @@ const ddRegion = createCheckboxDropdown(els.ddRegion, {
 const ddProvince = createCheckboxDropdown(els.ddProvince, {
   placeholder: "Tutte le province",
   renderLabel: (code) => provLabelSafe(code),
-  onOpen: () => ddProvince.refresh(), // ✅ quando apri, riallineo label estese
+  onOpen: () => ddProvince.refresh(),
   onChange: (arr) => {
     state.selectedProvinces = new Set(arr);
     recomputeDerivedRegions();
@@ -358,7 +369,6 @@ function cascadeGeoOptions() {
     ddCity.setSelected([...state.selectedCities], { silent: true });
   }
 
-  // ✅ garantisco che province ricalcoli etichette estese
   ddProvince.refresh();
 }
 
@@ -416,7 +426,7 @@ function rebuildFilters(features) {
 }
 
 // ----------------------------
-// Punti che passano i filtri NON-group
+// Filtri mappa
 // ----------------------------
 function passesNonGroupFilters(p) {
   const cat = els.category.value;
@@ -444,9 +454,6 @@ function passesNonGroupFilters(p) {
   return true;
 }
 
-// ----------------------------
-// Gruppi smart
-// ----------------------------
 function syncGroups() {
   if (!state.items.length) return;
 
@@ -483,9 +490,6 @@ function syncGroups() {
   }
 }
 
-// ----------------------------
-// Apply filters (map)
-// ----------------------------
 function applyFilters() {
   cluster.clearLayers();
 
@@ -504,9 +508,6 @@ function applyFilters() {
   els.kpiVisible.textContent = visible.toLocaleString("it-IT");
 }
 
-// ----------------------------
-// Reset totale
-// ----------------------------
 function resetAll() {
   els.category.value = "";
 
@@ -524,6 +525,8 @@ function resetAll() {
   state.selectedCities.clear();
   state.groupsTouched = false;
 
+  clearAddressSearch();
+
   if (state.geojson?.features) rebuildFilters(state.geojson.features);
   if (state.initialBounds) map.fitBounds(state.initialBounds);
 
@@ -532,7 +535,152 @@ function resetAll() {
 }
 
 // ----------------------------
-// Init
+// Ricerca indirizzo (Nominatim)
+// ----------------------------
+function escapeHtml(str) {
+  return String(str ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function openAddressResults() {
+  els.addressResults.classList.add("open");
+}
+
+function closeAddressResults() {
+  els.addressResults.classList.remove("open");
+}
+
+function clearAddressResults() {
+  state.searchResults = [];
+  state.activeSearchIndex = -1;
+  els.addressResults.innerHTML = "";
+  closeAddressResults();
+}
+
+function setActiveAddressResult(index) {
+  state.activeSearchIndex = index;
+  const items = els.addressResults.querySelectorAll(".search-item");
+  items.forEach((el, i) => el.classList.toggle("active", i === index));
+
+  const activeEl = items[index];
+  if (activeEl) {
+    const parent = els.addressResults;
+    const top = activeEl.offsetTop;
+    const bottom = top + activeEl.offsetHeight;
+    if (top < parent.scrollTop) parent.scrollTop = top;
+    if (bottom > parent.scrollTop + parent.clientHeight) {
+      parent.scrollTop = bottom - parent.clientHeight;
+    }
+  }
+}
+
+function setSearchMarker(lat, lon, label) {
+  const point = [Number(lat), Number(lon)];
+
+  if (searchMarker) {
+    map.removeLayer(searchMarker);
+  }
+
+  searchMarker = L.marker(point).addTo(map);
+
+  if (label) {
+    searchMarker.bindPopup(label).openPopup();
+  }
+
+  map.setView(point, 16);
+}
+
+function chooseAddressResult(index) {
+  const item = state.searchResults[index];
+  if (!item) return;
+
+  const lat = Number(item.lat);
+  const lon = Number(item.lon);
+  const label = item.display_name || "Risultato ricerca";
+
+  els.addressSearch.value = label;
+  clearAddressResults();
+  setSearchMarker(lat, lon, escapeHtml(label));
+}
+
+function clearAddressSearch() {
+  els.addressSearch.value = "";
+  clearAddressResults();
+
+  if (searchMarker) {
+    map.removeLayer(searchMarker);
+    searchMarker = null;
+  }
+}
+
+function renderAddressResults(results) {
+  state.searchResults = results || [];
+  state.activeSearchIndex = -1;
+
+  if (!state.searchResults.length) {
+    els.addressResults.innerHTML = `<div class="search-item">Nessun risultato trovato</div>`;
+    openAddressResults();
+    return;
+  }
+
+  els.addressResults.innerHTML = state.searchResults.map((item, index) => {
+    const title = escapeHtml(item.display_name || "Risultato");
+    const type = escapeHtml(item.type || item.addresstype || "");
+    return `
+      <div class="search-item" data-index="${index}">
+        ${title}
+        ${type ? `<small>${type}</small>` : ""}
+      </div>
+    `;
+  }).join("");
+
+  els.addressResults.querySelectorAll(".search-item").forEach((el) => {
+    el.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      chooseAddressResult(Number(el.dataset.index));
+    });
+  });
+
+  openAddressResults();
+  if (state.searchResults.length > 0) setActiveAddressResult(0);
+}
+
+async function searchAddress(query) {
+  const q = (query || "").trim();
+  if (q.length < 3) {
+    clearAddressResults();
+    return;
+  }
+
+  const url = new URL("https://nominatim.openstreetmap.org/search");
+  url.search = new URLSearchParams({
+    format: "jsonv2",
+    countrycodes: "it",
+    addressdetails: "1",
+    limit: "8",
+    q
+  }).toString();
+
+  const res = await fetch(url.toString(), {
+    headers: {
+      "Accept": "application/json"
+    }
+  });
+
+  if (!res.ok) {
+    throw new Error(`Errore ricerca indirizzo: ${res.status}`);
+  }
+
+  const data = await res.json();
+  renderAddressResults(data);
+}
+
+// ----------------------------
+// Init + events
 // ----------------------------
 async function init() {
   const res = await fetch("./locations.geojson", { cache: "no-store" });
@@ -558,8 +706,94 @@ async function init() {
   applyFilters();
 }
 
-els.category.addEventListener("change", () => { syncGroups(); applyFilters(); });
-els.reset.addEventListener("click", (e) => { e.preventDefault(); resetAll(); });
+els.category.addEventListener("change", () => {
+  syncGroups();
+  applyFilters();
+});
+
+els.reset.addEventListener("click", (e) => {
+  e.preventDefault();
+  resetAll();
+});
+
+els.addressSearchBtn.addEventListener("click", async () => {
+  try {
+    await searchAddress(els.addressSearch.value);
+  } catch (err) {
+    console.error(err);
+    els.addressResults.innerHTML = `<div class="search-item">Errore durante la ricerca</div>`;
+    openAddressResults();
+  }
+});
+
+els.addressClearBtn.addEventListener("click", () => {
+  clearAddressSearch();
+});
+
+els.addressSearch.addEventListener("keydown", async (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+
+    if (state.searchResults.length && state.activeSearchIndex >= 0) {
+      chooseAddressResult(state.activeSearchIndex);
+      return;
+    }
+
+    try {
+      await searchAddress(els.addressSearch.value);
+    } catch (err) {
+      console.error(err);
+      els.addressResults.innerHTML = `<div class="search-item">Errore durante la ricerca</div>`;
+      openAddressResults();
+    }
+  }
+
+  if (e.key === "ArrowDown") {
+    if (!state.searchResults.length) return;
+    e.preventDefault();
+    const next = Math.min(state.activeSearchIndex + 1, state.searchResults.length - 1);
+    setActiveAddressResult(next);
+  }
+
+  if (e.key === "ArrowUp") {
+    if (!state.searchResults.length) return;
+    e.preventDefault();
+    const prev = Math.max(state.activeSearchIndex - 1, 0);
+    setActiveAddressResult(prev);
+  }
+
+  if (e.key === "Escape") {
+    clearAddressResults();
+  }
+});
+
+let addressDebounce = null;
+els.addressSearch.addEventListener("input", () => {
+  clearTimeout(addressDebounce);
+
+  const q = els.addressSearch.value.trim();
+  if (q.length < 3) {
+    clearAddressResults();
+    return;
+  }
+
+  addressDebounce = setTimeout(async () => {
+    try {
+      await searchAddress(q);
+    } catch (err) {
+      console.error(err);
+      els.addressResults.innerHTML = `<div class="search-item">Errore durante la ricerca</div>`;
+      openAddressResults();
+    }
+  }, 300);
+});
+
+document.addEventListener("mousedown", (e) => {
+  const wrap = els.addressResults.parentElement;
+  if (!wrap.contains(e.target)) {
+    clearAddressResults();
+  }
+});
 
 init().catch((err) => {
   console.error(err);
