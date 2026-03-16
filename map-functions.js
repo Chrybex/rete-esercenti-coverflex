@@ -1,5 +1,4 @@
 const map = L.map("map", { scrollWheelZoom: true });
-
 L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 19,
   attribution: "&copy; OpenStreetMap contributors",
@@ -9,6 +8,10 @@ const cluster = L.markerClusterGroup({ showCoverageOnHover: false });
 cluster.addTo(map);
 
 let searchMarker = null;
+let debounceTimer = null;
+let activeIndex = -1;
+let currentResults = [];
+let lastRequestId = 0;
 
 const els = {
   category: document.getElementById("category"),
@@ -20,11 +23,11 @@ const els = {
   ddRegion: document.getElementById("dd-region"),
   ddProvince: document.getElementById("dd-province"),
   ddCity: document.getElementById("dd-city"),
-
-  addressSearch: document.getElementById("address-search"),
-  addressSearchBtn: document.getElementById("address-search-btn"),
-  addressClearBtn: document.getElementById("address-clear-btn"),
-  addressResults: document.getElementById("address-results"),
+  address: document.getElementById("address"),
+  searchBtn: document.getElementById("search-btn"),
+  results: document.getElementById("results"),
+  status: document.getElementById("status"),
+  searchWrap: document.querySelector(".search-wrap"),
 };
 
 const state = {
@@ -40,9 +43,6 @@ const state = {
   selectedCities: new Set(),
 
   groupsTouched: false,
-
-  searchResults: [],
-  activeSearchIndex: -1,
 };
 
 const norm = (s) => (s ?? "").toString().trim().toLowerCase();
@@ -62,11 +62,9 @@ function groupValue(p) {
 function effectiveRegions() {
   return new Set([...state.manualRegions, ...state.derivedRegions]);
 }
-
 function hasManualScope() {
   return state.manualRegions.size > 0;
 }
-
 function inManualScope(region) {
   return !hasManualScope() || state.manualRegions.has(region);
 }
@@ -93,26 +91,233 @@ function recomputeDerivedRegions() {
   state.derivedRegions = d;
 }
 
-function popupHtml(p) {
-  const esc = (x) =>
-    (x ?? "")
-      .toString()
-      .replaceAll("&", "&amp;")
-      .replaceAll("<", "&lt;")
-      .replaceAll(">", "&gt;");
+function escapeHtml(str) {
+  return String(str ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
 
-  const name = esc(p.name || "Esercente");
-  const cat = p.establishment_category ? `<div><strong>Categoria:</strong> ${esc(p.establishment_category)}</div>` : "";
-  const services = p.services ? `<div><strong>Servizi:</strong> ${esc(p.services)}</div>` : "";
+function popupHtml(p) {
+  const name = escapeHtml(p.name || "Esercente");
+  const cat = p.establishment_category ? `<div><strong>Categoria:</strong> ${escapeHtml(p.establishment_category)}</div>` : "";
+  const services = p.services ? `<div><strong>Servizi:</strong> ${escapeHtml(p.services)}</div>` : "";
   const addrParts = [p.address_line_1, p.address_zipcode, p.address_city, p.address_district].filter(Boolean);
-  const address = addrParts.length ? `<div><strong>Indirizzo:</strong> ${esc(addrParts.join(", "))}</div>` : "";
-  const group = `<div><strong>Gruppo:</strong> ${esc(groupValue(p))}</div>`;
-  const hubspot = p.hubspot_id ? `<div style="color:#64748b;font-size:12px;margin-top:6px;">HubSpot id: ${esc(p.hubspot_id)}</div>` : "";
+  const address = addrParts.length ? `<div><strong>Indirizzo:</strong> ${escapeHtml(addrParts.join(", "))}</div>` : "";
+  const group = `<div><strong>Gruppo:</strong> ${escapeHtml(groupValue(p))}</div>`;
+  const hubspot = p.hubspot_id ? `<div style="color:#64748b;font-size:12px;margin-top:6px;">HubSpot id: ${escapeHtml(p.hubspot_id)}</div>` : "";
 
   return `<div style="min-width:240px">
     <div style="font-weight:800;margin-bottom:6px;">${name}</div>
     ${cat}${services}${address}${group}${hubspot}
   </div>`;
+}
+
+// ----------------------------
+// Ricerca indirizzo
+// ----------------------------
+function setStatus(text) {
+  if (els.status) els.status.textContent = text || "";
+}
+
+function showResults() {
+  const visible = els.results.children.length > 0;
+  els.results.style.display = visible ? "block" : "none";
+  els.address.setAttribute("aria-expanded", visible ? "true" : "false");
+}
+
+function clearResults() {
+  currentResults = [];
+  activeIndex = -1;
+  els.results.innerHTML = "";
+  els.results.style.display = "none";
+  els.address.setAttribute("aria-expanded", "false");
+}
+
+function setActive(index) {
+  activeIndex = index;
+
+  const items = els.results.querySelectorAll("li[data-index]");
+  items.forEach((item, i) => {
+    item.classList.toggle("active", i === activeIndex);
+  });
+
+  const activeItem = items[activeIndex];
+  if (activeItem) {
+    const top = activeItem.offsetTop;
+    const bottom = top + activeItem.offsetHeight;
+
+    if (top < els.results.scrollTop) {
+      els.results.scrollTop = top;
+    } else if (bottom > els.results.scrollTop + els.results.clientHeight) {
+      els.results.scrollTop = bottom - els.results.clientHeight;
+    }
+  }
+}
+
+function setSearchMarker(lat, lon, label) {
+  if (searchMarker) {
+    map.removeLayer(searchMarker);
+  }
+
+  searchMarker = L.marker([lat, lon]).addTo(map);
+  map.setView([lat, lon], 16);
+
+  if (label) {
+    searchMarker.bindPopup(label).openPopup();
+  }
+}
+
+function buildPrimary(item) {
+  const address = item.address || {};
+  const road = address.road || address.pedestrian || address.footway || address.cycleway || "";
+  const number = address.house_number || "";
+  const village = address.city || address.town || address.village || address.hamlet || "";
+
+  if (road && number) return `${road} ${number}`;
+  if (road) return road;
+  if (village) return village;
+  return item.display_name || "Risultato";
+}
+
+function buildSecondary(item) {
+  const address = item.address || {};
+  const parts = [
+    address.postcode,
+    address.city || address.town || address.village || address.hamlet,
+    address.county,
+    address.state,
+    address.country
+  ].filter(Boolean);
+
+  return parts.join(", ");
+}
+
+function renderAddressResults(results) {
+  els.results.innerHTML = "";
+  currentResults = results;
+
+  if (!results.length) {
+    els.results.innerHTML = `<li class="result-empty">Nessun risultato trovato in Italia</li>`;
+    showResults();
+    return;
+  }
+
+  results.forEach((item, index) => {
+    const li = document.createElement("li");
+    li.setAttribute("role", "option");
+    li.setAttribute("data-index", String(index));
+
+    const primary = buildPrimary(item);
+    const secondary = buildSecondary(item);
+
+    li.innerHTML = `
+      <span class="result-title">${escapeHtml(primary)}</span>
+      <span class="result-subtitle">${escapeHtml(secondary || item.display_name || "")}</span>
+    `;
+
+    li.addEventListener("mouseenter", () => setActive(index));
+    li.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      chooseResult(index);
+    });
+
+    els.results.appendChild(li);
+  });
+
+  showResults();
+  setActive(0);
+}
+
+function chooseResult(index) {
+  const item = currentResults[index];
+  if (!item) return;
+
+  const lat = parseFloat(item.lat);
+  const lon = parseFloat(item.lon);
+
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+
+  els.address.value = item.display_name;
+  clearResults();
+  setSearchMarker(lat, lon, item.display_name);
+  setStatus("Indirizzo trovato.");
+}
+
+function chooseDirect(item) {
+  const lat = parseFloat(item.lat);
+  const lon = parseFloat(item.lon);
+
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    setStatus("Coordinate non valide.");
+    return;
+  }
+
+  els.address.value = item.display_name;
+  clearResults();
+  setSearchMarker(lat, lon, item.display_name);
+  setStatus("Indirizzo trovato.");
+}
+
+async function fetchAddresses(query, limit = 5) {
+  const url =
+    `https://nominatim.openstreetmap.org/search?` +
+    `format=jsonv2&` +
+    `addressdetails=1&` +
+    `countrycodes=it&` +
+    `limit=${limit}&` +
+    `dedupe=1&` +
+    `q=${encodeURIComponent(query)}`;
+
+  const response = await fetch(url, {
+    headers: {
+      "Accept": "application/json"
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error("Errore HTTP " + response.status);
+  }
+
+  return response.json();
+}
+
+async function searchAddress() {
+  const query = els.address.value.trim();
+
+  if (!query) {
+    setStatus("Inserisci un indirizzo.");
+    clearResults();
+    return;
+  }
+
+  setStatus("Ricerca in corso...");
+
+  try {
+    const results = await fetchAddresses(query, 1);
+
+    if (!results.length) {
+      setStatus("Nessun indirizzo trovato in Italia.");
+      clearResults();
+      return;
+    }
+
+    chooseDirect(results[0]);
+  } catch (error) {
+    console.error(error);
+    setStatus("Errore durante la ricerca.");
+  }
+}
+
+function clearSearchAddress() {
+  clearResults();
+  setStatus("");
+  if (searchMarker) {
+    map.removeLayer(searchMarker);
+    searchMarker = null;
+  }
 }
 
 // ----------------------------
@@ -426,7 +631,7 @@ function rebuildFilters(features) {
 }
 
 // ----------------------------
-// Filtri mappa
+// Punti che passano i filtri NON-group
 // ----------------------------
 function passesNonGroupFilters(p) {
   const cat = els.category.value;
@@ -454,6 +659,9 @@ function passesNonGroupFilters(p) {
   return true;
 }
 
+// ----------------------------
+// Gruppi smart
+// ----------------------------
 function syncGroups() {
   if (!state.items.length) return;
 
@@ -490,6 +698,9 @@ function syncGroups() {
   }
 }
 
+// ----------------------------
+// Apply filters (map)
+// ----------------------------
 function applyFilters() {
   cluster.clearLayers();
 
@@ -508,6 +719,9 @@ function applyFilters() {
   els.kpiVisible.textContent = visible.toLocaleString("it-IT");
 }
 
+// ----------------------------
+// Reset totale
+// ----------------------------
 function resetAll() {
   els.category.value = "";
 
@@ -525,7 +739,8 @@ function resetAll() {
   state.selectedCities.clear();
   state.groupsTouched = false;
 
-  clearAddressSearch();
+  els.address.value = "";
+  clearSearchAddress();
 
   if (state.geojson?.features) rebuildFilters(state.geojson.features);
   if (state.initialBounds) map.fitBounds(state.initialBounds);
@@ -535,152 +750,7 @@ function resetAll() {
 }
 
 // ----------------------------
-// Ricerca indirizzo (Nominatim)
-// ----------------------------
-function escapeHtml(str) {
-  return String(str ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
-function openAddressResults() {
-  els.addressResults.classList.add("open");
-}
-
-function closeAddressResults() {
-  els.addressResults.classList.remove("open");
-}
-
-function clearAddressResults() {
-  state.searchResults = [];
-  state.activeSearchIndex = -1;
-  els.addressResults.innerHTML = "";
-  closeAddressResults();
-}
-
-function setActiveAddressResult(index) {
-  state.activeSearchIndex = index;
-  const items = els.addressResults.querySelectorAll(".search-item");
-  items.forEach((el, i) => el.classList.toggle("active", i === index));
-
-  const activeEl = items[index];
-  if (activeEl) {
-    const parent = els.addressResults;
-    const top = activeEl.offsetTop;
-    const bottom = top + activeEl.offsetHeight;
-    if (top < parent.scrollTop) parent.scrollTop = top;
-    if (bottom > parent.scrollTop + parent.clientHeight) {
-      parent.scrollTop = bottom - parent.clientHeight;
-    }
-  }
-}
-
-function setSearchMarker(lat, lon, label) {
-  const point = [Number(lat), Number(lon)];
-
-  if (searchMarker) {
-    map.removeLayer(searchMarker);
-  }
-
-  searchMarker = L.marker(point).addTo(map);
-
-  if (label) {
-    searchMarker.bindPopup(label).openPopup();
-  }
-
-  map.setView(point, 16);
-}
-
-function chooseAddressResult(index) {
-  const item = state.searchResults[index];
-  if (!item) return;
-
-  const lat = Number(item.lat);
-  const lon = Number(item.lon);
-  const label = item.display_name || "Risultato ricerca";
-
-  els.addressSearch.value = label;
-  clearAddressResults();
-  setSearchMarker(lat, lon, escapeHtml(label));
-}
-
-function clearAddressSearch() {
-  els.addressSearch.value = "";
-  clearAddressResults();
-
-  if (searchMarker) {
-    map.removeLayer(searchMarker);
-    searchMarker = null;
-  }
-}
-
-function renderAddressResults(results) {
-  state.searchResults = results || [];
-  state.activeSearchIndex = -1;
-
-  if (!state.searchResults.length) {
-    els.addressResults.innerHTML = `<div class="search-item">Nessun risultato trovato</div>`;
-    openAddressResults();
-    return;
-  }
-
-  els.addressResults.innerHTML = state.searchResults.map((item, index) => {
-    const title = escapeHtml(item.display_name || "Risultato");
-    const type = escapeHtml(item.type || item.addresstype || "");
-    return `
-      <div class="search-item" data-index="${index}">
-        ${title}
-        ${type ? `<small>${type}</small>` : ""}
-      </div>
-    `;
-  }).join("");
-
-  els.addressResults.querySelectorAll(".search-item").forEach((el) => {
-    el.addEventListener("mousedown", (e) => {
-      e.preventDefault();
-      chooseAddressResult(Number(el.dataset.index));
-    });
-  });
-
-  openAddressResults();
-  if (state.searchResults.length > 0) setActiveAddressResult(0);
-}
-
-async function searchAddress(query) {
-  const q = (query || "").trim();
-  if (q.length < 3) {
-    clearAddressResults();
-    return;
-  }
-
-  const url = new URL("https://nominatim.openstreetmap.org/search");
-  url.search = new URLSearchParams({
-    format: "jsonv2",
-    countrycodes: "it",
-    addressdetails: "1",
-    limit: "8",
-    q
-  }).toString();
-
-  const res = await fetch(url.toString(), {
-    headers: {
-      "Accept": "application/json"
-    }
-  });
-
-  if (!res.ok) {
-    throw new Error(`Errore ricerca indirizzo: ${res.status}`);
-  }
-
-  const data = await res.json();
-  renderAddressResults(data);
-}
-
-// ----------------------------
-// Init + events
+// Init
 // ----------------------------
 async function init() {
   const res = await fetch("./locations.geojson", { cache: "no-store" });
@@ -716,83 +786,72 @@ els.reset.addEventListener("click", (e) => {
   resetAll();
 });
 
-els.addressSearchBtn.addEventListener("click", async () => {
-  try {
-    await searchAddress(els.addressSearch.value);
-  } catch (err) {
-    console.error(err);
-    els.addressResults.innerHTML = `<div class="search-item">Errore durante la ricerca</div>`;
-    openAddressResults();
-  }
+els.searchBtn.addEventListener("click", () => {
+  searchAddress();
 });
 
-els.addressClearBtn.addEventListener("click", () => {
-  clearAddressSearch();
-});
+els.address.addEventListener("input", () => {
+  const query = els.address.value.trim();
+  clearTimeout(debounceTimer);
 
-els.addressSearch.addEventListener("keydown", async (e) => {
-  if (e.key === "Enter") {
-    e.preventDefault();
-
-    if (state.searchResults.length && state.activeSearchIndex >= 0) {
-      chooseAddressResult(state.activeSearchIndex);
-      return;
-    }
-
-    try {
-      await searchAddress(els.addressSearch.value);
-    } catch (err) {
-      console.error(err);
-      els.addressResults.innerHTML = `<div class="search-item">Errore durante la ricerca</div>`;
-      openAddressResults();
-    }
-  }
-
-  if (e.key === "ArrowDown") {
-    if (!state.searchResults.length) return;
-    e.preventDefault();
-    const next = Math.min(state.activeSearchIndex + 1, state.searchResults.length - 1);
-    setActiveAddressResult(next);
-  }
-
-  if (e.key === "ArrowUp") {
-    if (!state.searchResults.length) return;
-    e.preventDefault();
-    const prev = Math.max(state.activeSearchIndex - 1, 0);
-    setActiveAddressResult(prev);
-  }
-
-  if (e.key === "Escape") {
-    clearAddressResults();
-  }
-});
-
-let addressDebounce = null;
-els.addressSearch.addEventListener("input", () => {
-  clearTimeout(addressDebounce);
-
-  const q = els.addressSearch.value.trim();
-  if (q.length < 3) {
-    clearAddressResults();
+  if (query.length < 3) {
+    clearResults();
+    setStatus("");
     return;
   }
 
-  addressDebounce = setTimeout(async () => {
+  debounceTimer = setTimeout(async () => {
+    const requestId = ++lastRequestId;
+
     try {
-      await searchAddress(q);
-    } catch (err) {
-      console.error(err);
-      els.addressResults.innerHTML = `<div class="search-item">Errore durante la ricerca</div>`;
-      openAddressResults();
+      const results = await fetchAddresses(query, 6);
+
+      if (requestId !== lastRequestId) return;
+
+      renderAddressResults(results);
+      setStatus(results.length ? "Seleziona un risultato." : "Nessun risultato trovato in Italia.");
+    } catch (error) {
+      console.error(error);
+
+      if (requestId !== lastRequestId) return;
+
+      clearResults();
+      setStatus("Errore durante l'autocomplete.");
     }
   }, 300);
 });
 
-document.addEventListener("mousedown", (e) => {
-  const wrap = els.addressResults.parentElement;
-  if (!wrap.contains(e.target)) {
-    clearAddressResults();
+els.address.addEventListener("keydown", (e) => {
+  const hasResults = currentResults.length > 0;
+
+  if (e.key === "ArrowDown" && hasResults) {
+    e.preventDefault();
+    setActive(Math.min(activeIndex + 1, currentResults.length - 1));
+  } else if (e.key === "ArrowUp" && hasResults) {
+    e.preventDefault();
+    setActive(Math.max(activeIndex - 1, 0));
+  } else if (e.key === "Enter") {
+    e.preventDefault();
+
+    if (hasResults && activeIndex >= 0) {
+      chooseResult(activeIndex);
+    } else {
+      searchAddress();
+    }
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    clearResults();
   }
+});
+
+document.addEventListener("mousedown", (e) => {
+  if (els.searchWrap && !els.searchWrap.contains(e.target)) {
+    clearResults();
+  }
+});
+
+map.on("click", () => {
+  clearResults();
 });
 
 init().catch((err) => {
