@@ -786,28 +786,29 @@ function applyAddressToFilters(item) {
 }
 
     async function fetchAddresses(query, limit = 5) {
-      const url =
-        `https://nominatim.openstreetmap.org/search?` +
-        `format=jsonv2&` +
-        `addressdetails=1&` +
-        `countrycodes=it&` +
-        `limit=${limit}&` +
-        `dedupe=1&` +
-        `q=${encodeURIComponent(query)}`;
+  const url =
+    `https://nominatim.openstreetmap.org/search?` +
+    `format=jsonv2&` +
+    `addressdetails=1&` +
+    `countrycodes=it&` +
+    `accept-language=it&` +
+    `limit=${limit}&` +
+    `dedupe=1&` +
+    `q=${encodeURIComponent(query)}`;
 
-      const response = await fetch(url, {
-        headers: {
-          "Accept": "application/json"
-        }
-      });
-
-      if (!response.ok) {
-        throw new Error("Errore HTTP " + response.status);
-      }
-
-      return response.json();
+  const response = await fetch(url, {
+    headers: {
+      "Accept": "application/json",
+      "Accept-Language": "it"
     }
+  });
 
+  if (!response.ok) {
+    throw new Error("Errore HTTP " + response.status);
+  }
+
+  return response.json();
+}
     async function searchAddress() {
       const query = els.address.value.trim();
 
