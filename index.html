@@ -101,10 +101,34 @@
       </div>
 
       <div id="status"></div>
-      <div id="map"></div>
+           <div class="nearby-box">
+  <div class="nearby-top">
+    <div class="nearby-title">
+      Esercenti nel raggio
+      <span id="nearby-count">0</span>
+    </div>
+
+    <div class="nearby-radius-wrap">
+      <label for="nearby-radius" class="nearby-radius-label">Raggio</label>
+      <select id="nearby-radius" class="nearby-radius">
+        <option value="1">1 km</option>
+        <option value="3">3 km</option>
+        <option value="5" selected>5 km</option>
+        <option value="10">10 km</option>
+        <option value="20">20 km</option>
+      </select>
     </div>
   </div>
 
+  <div id="nearby-list" class="nearby-list">
+    <div class="nearby-empty">
+      Cerca un indirizzo per vedere gli esercenti più vicini.
+    </div>
+  </div>
+</div>
+      <div id="map"></div>
+    </div>
+  </div>
   <div class="hint">
     <b>Nota:</b> puoi selezionare più opzioni nei filtri. Se selezioni una o più <b>regioni</b>, potrai scegliere solo <b>province</b> e <b>città</b> appartenenti a quelle regioni. La ricerca verrà progressivamente ristretta fino alla città selezionata (che ha priorità): di conseguenza, <b>non verranno prese in considerazione</b> province o regioni che non includono le città selezionate.<br><br>
 

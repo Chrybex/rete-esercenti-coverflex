@@ -30,7 +30,10 @@
       searchBtn: document.getElementById("search-btn"),
       results: document.getElementById("results"),
       status: document.getElementById("status"),
-      searchWrap: document.querySelector(".search-wrap")
+      searchWrap: document.querySelector(".search-wrap"),
+      nearbyRadius: document.getElementById("nearby-radius"),
+      nearbyCount: document.getElementById("nearby-count"),
+      nearbyList: document.getElementById("nearby-list")
     };
 
     const state = {
@@ -44,6 +47,8 @@
       selectedProvinces: new Set(),
       selectedCities: new Set(),
       groupsTouched: false,
+      lastSearchLat: null,
+      lastSearchLon: null,
     };
 
     const norm = (s) => (s ?? "").toString().trim().toLowerCase();
@@ -275,6 +280,7 @@
         state.groupsTouched = true;
         state.selectedGroups = new Set(arr);
         applyFilters();
+       refreshNearbyListIfPossible();
       },
     });
 
@@ -284,6 +290,7 @@
         state.selectedServices = new Set(arr);
         syncGroups();
         applyFilters();
+       refreshNearbyListIfPossible();
       },
     });
 
@@ -320,6 +327,7 @@
         cascadeGeoOptions();
         syncGroups();
         applyFilters();
+       refreshNearbyListIfPossible();
       },
     });
 
@@ -334,6 +342,7 @@
         cascadeGeoOptions();
         syncGroups();
         applyFilters();
+       refreshNearbyListIfPossible();
       },
     });
 
@@ -346,6 +355,7 @@
         cascadeGeoOptions();
         syncGroups();
         applyFilters();
+       refreshNearbyListIfPossible();
       },
     });
 
@@ -564,6 +574,14 @@
       state.selectedProvinces.clear();
       state.selectedCities.clear();
       state.groupsTouched = false;
+     state.lastSearchLat = null;
+state.lastSearchLon = null;
+els.nearbyCount.textContent = "0";
+els.nearbyList.innerHTML = `
+  <div class="nearby-empty">
+    Cerca un indirizzo per vedere gli esercenti più vicini.
+  </div>
+`;
 
       clearSearchResults();
       clearSearchMarker();
@@ -575,6 +593,7 @@
 
       syncGroups();
       applyFilters();
+     refreshNearbyListIfPossible();
     }
 
     function setStatus(text) {
@@ -712,26 +731,87 @@ function setSearchMarker(lat, lon, label) {
       setActiveResult(0);
     }
 
-    function chooseDirectAddress(item) {
-      const lat = parseFloat(item.lat);
-      const lon = parseFloat(item.lon);
+function chooseAddressResult(index) {
+  const item = currentResults[index];
+  if (!item) return;
+  chooseDirectAddress(item);
+}
 
-      if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
-        setStatus("Coordinate non valide.");
-        return;
+function findProvinceCodeByName(provinceName, regionName = "") {
+  const provinceNorm = norm(provinceName);
+  const regionNorm = norm(regionName);
+
+  if (!provinceNorm || !window.PROVINCE_INFO) return "";
+
+  for (const [code, info] of Object.entries(window.PROVINCE_INFO)) {
+    const infoName = norm(info.name || "");
+    const infoRegion = norm(info.region || "");
+
+    if (infoName === provinceNorm) {
+      if (!regionNorm || infoRegion === regionNorm) {
+        return code;
       }
-
-      els.address.value = item.display_name;
-      clearSearchResults();
-      setSearchMarker(lat, lon, item.display_name);
-      setStatus("Indirizzo trovato.");
     }
+  }
 
-    function chooseAddressResult(index) {
-      const item = currentResults[index];
-      if (!item) return;
-      chooseDirectAddress(item);
-    }
+  return "";
+}
+
+function applyAddressToFilters(item) {
+  const a = item.address || {};
+
+  const region = (a.state || "").trim();
+
+  const rawCounty = (a.county || a.province || "").trim();
+  const provinceName = rawCounty
+    .replace(/^Provincia di\s+/i, "")
+    .replace(/^Città Metropolitana di\s+/i, "")
+    .trim();
+
+  const provinceCode = findProvinceCodeByName(provinceName, region);
+
+  state.manualRegions.clear();
+  state.derivedRegions.clear();
+  state.selectedProvinces.clear();
+  state.selectedCities.clear();
+
+  if (region) state.manualRegions.add(region);
+  if (provinceCode) state.selectedProvinces.add(provinceCode);
+
+  recomputeDerivedRegions();
+
+  ddRegion.setSelected([...effectiveRegions()], { silent: true });
+  cascadeGeoOptions();
+
+  ddProvince.setSelected([...state.selectedProvinces], { silent: true });
+  ddCity.setSelected([], { silent: true });
+
+  syncGroups();
+  applyFilters();
+ refreshNearbyListIfPossible();
+}
+
+   function chooseDirectAddress(item) {
+  const lat = parseFloat(item.lat);
+  const lon = parseFloat(item.lon);
+
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    setStatus("Coordinate non valide.");
+    return;
+  }
+
+  els.address.value = item.display_name;
+  clearSearchResults();
+  setSearchMarker(lat, lon, item.display_name);
+
+  state.lastSearchLat = lat;
+  state.lastSearchLon = lon;
+
+  applyAddressToFilters(item);
+  renderNearbyLocations(lat, lon);
+
+  setStatus("Indirizzo trovato.");
+}
 
     async function fetchAddresses(query, limit = 5) {
       const url =
@@ -783,6 +863,110 @@ function setSearchMarker(lat, lon, label) {
       }
     }
 
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const toRad = (deg) => deg * Math.PI / 180;
+  const R = 6371;
+
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) *
+    Math.cos(toRad(lat2)) *
+    Math.sin(dLon / 2) ** 2;
+
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+function getNearbyLocations(lat, lon, radiusKm) {
+  return state.items
+    .filter((it) => {
+      const p = it.feature.properties || {};
+
+      if (!passesNonGroupFilters(p)) return false;
+
+      const g = groupValue(p);
+      if (state.selectedGroups.size > 0 && !state.selectedGroups.has(g)) {
+        return false;
+      }
+
+      return true;
+    })
+    .map((it) => {
+      const [itemLng, itemLat] = it.feature.geometry.coordinates;
+      const distanceKm = haversineKm(lat, lon, itemLat, itemLng);
+
+      return {
+        item: it,
+        distanceKm
+      };
+    })
+    .filter((x) => x.distanceKm <= radiusKm)
+    .sort((a, b) => a.distanceKm - b.distanceKm);
+}
+
+function refreshNearbyListIfPossible() {
+  if (
+    Number.isFinite(state.lastSearchLat) &&
+    Number.isFinite(state.lastSearchLon)
+  ) {
+    renderNearbyLocations(state.lastSearchLat, state.lastSearchLon);
+  }
+}
+
+function renderNearbyLocations(lat, lon) {
+  const radiusKm = Number(els.nearbyRadius.value || 5);
+  const results = getNearbyLocations(lat, lon, radiusKm);
+
+  els.nearbyCount.textContent = results.length;
+
+  if (!results.length) {
+    els.nearbyList.innerHTML = `
+      <div class="nearby-empty">
+        Nessun esercente trovato entro ${radiusKm} km.
+      </div>
+    `;
+    return;
+  }
+ 
+ 
+  els.nearbyList.innerHTML = results.map(({ item, distanceKm }, index) => {
+    const p = item.feature.properties || {};
+    const name = escapeHtml(p.name || "Esercente");
+    const group = escapeHtml(groupValue(p));
+    const city = escapeHtml(p.address_city || "");
+    const category = escapeHtml(p.establishment_category || "");
+
+    return `
+      <div class="nearby-item" data-nearby-index="${index}">
+        <div class="nearby-name">${name}</div>
+        <div class="nearby-meta">
+          ${category ? `<div><strong>Categoria:</strong> ${category}</div>` : ""}
+          <div><strong>Gruppo:</strong> ${group}</div>
+          ${city ? `<div><strong>Città:</strong> ${city}</div>` : ""}
+        </div>
+        <span class="nearby-distance">${distanceKm.toFixed(2)} km</span>
+      </div>
+    `;
+  }).join("");
+
+  const nodes = els.nearbyList.querySelectorAll(".nearby-item");
+  nodes.forEach((node, index) => {
+    node.addEventListener("click", () => {
+      const result = results[index];
+      if (!result) return;
+
+      const marker = result.item.marker;
+      const ll = marker.getLatLng();
+
+      map.setView(ll, 17);
+      marker.openPopup();
+    });
+  });
+}
+
     async function init() {
       const res = await fetch("./locations.geojson", { cache: "no-store" });
       if (!res.ok) throw new Error("Impossibile caricare locations.geojson");
@@ -792,11 +976,20 @@ function setSearchMarker(lat, lon, label) {
 
       els.kpiTotal.textContent = geojson.features.length.toLocaleString("it-IT");
 
-      state.items = geojson.features.map((f) => {
-        const [lng, lat] = f.geometry.coordinates;
-        const marker = L.marker([lat, lng]).bindPopup(popupHtml(f.properties || {}));
-        return { feature: f, marker };
-      });
+     state.items = geojson.features.map((f) => {
+
+  if (f.properties?.address_city) {
+    const c = f.properties.address_city.trim().toLowerCase();
+    f.properties.address_city = c.charAt(0).toUpperCase() + c.slice(1);
+  }
+
+  const [lng, lat] = f.geometry.coordinates;
+
+  const marker = L.marker([lat, lng])
+    .bindPopup(popupHtml(f.properties || {}));
+
+  return { feature: f, marker };
+});
 
       const bounds = L.latLngBounds(state.items.map(x => x.marker.getLatLng())).pad(0.08);
       state.initialBounds = bounds;
@@ -805,11 +998,13 @@ function setSearchMarker(lat, lon, label) {
       rebuildFilters(geojson.features);
       syncGroups();
       applyFilters();
+     refreshNearbyListIfPossible();
     }
 
     els.category.addEventListener("change", () => {
       syncGroups();
       applyFilters();
+     refreshNearbyListIfPossible();
     });
 
     els.reset.addEventListener("click", (e) => {
@@ -818,6 +1013,14 @@ function setSearchMarker(lat, lon, label) {
     });
 
     els.searchBtn.addEventListener("click", searchAddress);
+els.nearbyRadius.addEventListener("change", () => {
+  if (
+    Number.isFinite(state.lastSearchLat) &&
+    Number.isFinite(state.lastSearchLon)
+  ) {
+    renderNearbyLocations(state.lastSearchLat, state.lastSearchLon);
+  }
+});
 
     els.address.addEventListener("input", () => {
       const query = els.address.value.trim();
