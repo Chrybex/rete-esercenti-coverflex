@@ -928,7 +928,7 @@ function renderNearbyLocations(lat, lon) {
 }
 
     async function init() {
-      const res = await fetch("./locations.geojson", { cache: "no-store" });
+      const res = await fetch("./converted-leaflet.geojson", { cache: "no-store" });
       if (!res.ok) throw new Error("Impossibile caricare locations.geojson");
 
       const geojson = await res.json();
