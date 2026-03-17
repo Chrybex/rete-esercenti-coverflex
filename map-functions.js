@@ -1,4 +1,7 @@
- const map = L.map("map", { scrollWheelZoom: true });
+const map = L.map("map", {
+  scrollWheelZoom: true,
+  preferCanvas: true
+});
 
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 19,
@@ -36,22 +39,28 @@
       nearbyList: document.getElementById("nearby-list")
     };
 
-    const state = {
-      geojson: null,
-      items: [],
-      initialBounds: null,
-      selectedGroups: new Set(),
-      selectedServices: new Set(),
-      manualRegions: new Set(),
-      derivedRegions: new Set(),
-      selectedProvinces: new Set(),
-      selectedCities: new Set(),
-      groupsTouched: false,
-      lastSearchLat: null,
-      lastSearchLon: null,
-    };
+const state = {
+  geojson: null,
+  items: [],
+  visibleItems: [],
+  initialBounds: null,
+  selectedGroups: new Set(),
+  selectedServices: new Set(),
+  manualRegions: new Set(),
+  derivedRegions: new Set(),
+  selectedProvinces: new Set(),
+  selectedCities: new Set(),
+  groupsTouched: false,
+  lastSearchLat: null,
+  lastSearchLon: null,
+};
 
     const norm = (s) => (s ?? "").toString().trim().toLowerCase();
+function normalizeCityName(name) {
+  const s = (name ?? "").toString().trim().toLowerCase();
+  if (!s) return "";
+  return s.replace(/\b\w/g, (c) => c.toUpperCase());
+}
     const provCode = (p) => (p?.address_district || "").toUpperCase().trim();
     const provRegion = (code) => (window.PROVINCE_INFO?.[code]?.region || "");
 
@@ -77,26 +86,23 @@
       return !hasManualScope() || state.manualRegions.has(region);
     }
 
-    function recomputeDerivedRegions() {
-      const d = new Set();
+function recomputeDerivedRegions() {
+  const d = new Set();
 
-      for (const code of state.selectedProvinces) {
-        const reg = provRegion(code);
-        if (reg) d.add(reg);
-      }
+  for (const code of state.selectedProvinces) {
+    const reg = provRegion(code);
+    if (reg) d.add(reg);
+  }
 
-      if (state.selectedCities.size > 0) {
-        for (const it of state.items) {
-          const p = it.feature.properties || {};
-          const city = (p.address_city || "").trim();
-          if (!city || !state.selectedCities.has(city)) continue;
-          const reg = provRegion(provCode(p));
-          if (reg) d.add(reg);
-        }
-      }
-
-      state.derivedRegions = d;
+  if (state.selectedCities.size > 0) {
+    for (const it of state.items) {
+      if (!it.city || !state.selectedCities.has(it.city)) continue;
+      if (it.region) d.add(it.region);
     }
+  }
+
+  state.derivedRegions = d;
+}
 
     function popupHtml(p) {
       const esc = (x) =>
@@ -307,19 +313,17 @@
             }
           }
 
-          for (const c of [...state.selectedCities]) {
-            let ok = false;
-            for (const it of state.items) {
-              const p = it.feature.properties || {};
-              if ((p.address_city || "").trim() !== c) continue;
-              const reg = provRegion(provCode(p));
-              if (reg && state.manualRegions.has(reg)) {
-                ok = true;
-                break;
-              }
-            }
-            if (!ok) state.selectedCities.delete(c);
-          }
+  for (const c of [...state.selectedCities]) {
+  let ok = false;
+  for (const it of state.items) {
+    if (it.city !== c) continue;
+    if (it.region && state.manualRegions.has(it.region)) {
+      ok = true;
+      break;
+    }
+  }
+  if (!ok) state.selectedCities.delete(c);
+}
         }
 
         recomputeDerivedRegions();
@@ -372,24 +376,19 @@
       if (sorted.includes(current)) select.value = current;
     }
 
-    function computeGeoOptions() {
-      const provinces = new Set();
-      const cities = new Set();
+function computeGeoOptions() {
+  const provinces = new Set();
+  const cities = new Set();
 
-      for (const it of state.items) {
-        const p = it.feature.properties || {};
-        const code = provCode(p);
-        const reg = provRegion(code);
-        const city = (p.address_city || "").trim();
+  for (const it of state.items) {
+    if (!inManualScope(it.region)) continue;
 
-        if (!inManualScope(reg)) continue;
+    if (it.province) provinces.add(it.province);
+    if (it.city) cities.add(it.city);
+  }
 
-        if (code) provinces.add(code);
-        if (city) cities.add(city);
-      }
-
-      return { provinces, cities };
-    }
+  return { provinces, cities };
+}
 
     function cascadeGeoOptions() {
       const { provinces, cities } = computeGeoOptions();
@@ -418,145 +417,118 @@
       ddProvince.refresh();
     }
 
-    function rebuildFilters(features) {
-      const cats = new Set();
-      const services = new Set();
-      const groups = new Set();
-      const regionsAll = new Set();
-      const provincesAll = new Set();
-      const citiesAll = new Set();
+function rebuildFilters() {
+  const cats = new Set();
+  const services = new Set();
+  const groups = new Set();
+  const regionsAll = new Set();
+  const provincesAll = new Set();
+  const citiesAll = new Set();
 
-      for (const f of features) {
-        const p = f.properties || {};
+  for (const it of state.items) {
+    if (it.category) cats.add(it.category);
+    if (it.group) groups.add(it.group);
+    if (it.region) regionsAll.add(it.region);
+    if (it.province) provincesAll.add(it.province);
+    if (it.city) citiesAll.add(it.city);
 
-        if (p.establishment_category) cats.add(p.establishment_category);
-        groups.add(groupValue(p));
+    it.services.forEach(s => services.add(s));
+  }
 
-        const code = provCode(p);
-        const reg = provRegion(code);
-        if (reg) regionsAll.add(reg);
-        if (code) provincesAll.add(code);
+  buildSingleSelect(els.category, cats, "Tutte");
+  ddService.setValues(services);
+  ddRegion.setValues(regionsAll);
+  ddProvince.setValues(provincesAll);
+  ddCity.setValues(citiesAll);
+  ddGroup.setValues(groups);
 
-        const city = (p.address_city || "").trim();
-        if (city) citiesAll.add(city);
+  ddGroup.setSelected([], { silent: true });
+  ddRegion.setSelected([], { silent: true });
+  ddProvince.setSelected([], { silent: true });
+  ddCity.setSelected([], { silent: true });
 
-        if (p.services) {
-          p.services
-            .split(",")
-            .map(s => s.trim())
-            .filter(Boolean)
-            .forEach(s => services.add(s));
-        }
-      }
+  state.selectedServices.clear();
+  state.manualRegions.clear();
+  state.derivedRegions.clear();
+  state.selectedProvinces.clear();
+  state.selectedCities.clear();
+  state.selectedGroups.clear();
+  state.groupsTouched = false;
 
-      buildSingleSelect(els.category, cats, "Tutte");
-      ddService.setValues(services);
-      ddRegion.setValues(regionsAll);
-      ddProvince.setValues(provincesAll);
-      ddCity.setValues(citiesAll);
-      ddGroup.setValues(groups);
+  cascadeGeoOptions();
+}
 
-      ddGroup.setSelected([], { silent: true });
-      ddRegion.setSelected([], { silent: true });
-      ddProvince.setSelected([], { silent: true });
-      ddCity.setSelected([], { silent: true });
+    function passesNonGroupFilters(it) {
+  const cat = els.category.value;
+  const regionsSel = [...effectiveRegions()];
+  const provincesSel = [...state.selectedProvinces];
+  const citiesSel = [...state.selectedCities];
+  const servicesSel = [...state.selectedServices];
 
-      state.selectedServices.clear();
-      state.manualRegions.clear();
-      state.derivedRegions.clear();
-      state.selectedProvinces.clear();
-      state.selectedCities.clear();
+  if (cat && it.category !== cat) return false;
+  if (regionsSel.length > 0 && !regionsSel.includes(it.region)) return false;
+  if (provincesSel.length > 0 && !provincesSel.includes(it.province)) return false;
+  if (citiesSel.length > 0 && !citiesSel.includes(it.city)) return false;
+
+  if (servicesSel.length > 0) {
+    if (!servicesSel.some(s => it.services.includes(s))) return false;
+  }
+
+  return true;
+}
+function syncGroups() {
+  if (!state.items.length) return;
+
+  const cat = els.category.value;
+  const hasNonGroup =
+    !!cat ||
+    state.selectedServices.size > 0 ||
+    effectiveRegions().size > 0 ||
+    state.selectedProvinces.size > 0 ||
+    state.selectedCities.size > 0;
+
+  const available = new Set();
+
+  for (const it of state.items) {
+    if (!passesNonGroupFilters(it)) continue;
+    available.add(it.group);
+  }
+
+  const availArr = [...available].sort((a, b) => a.localeCompare(b, "it"));
+  ddGroup.setValues(availArr);
+
+  if (!state.groupsTouched) {
+    if (!hasNonGroup) {
       state.selectedGroups.clear();
-      state.groupsTouched = false;
-
-      cascadeGeoOptions();
+      ddGroup.setSelected([], { silent: true });
+    } else {
+      state.selectedGroups = new Set(availArr);
+      ddGroup.setSelected(availArr, { silent: true });
     }
+  } else {
+    const kept = availArr.filter(g => state.selectedGroups.has(g));
+    state.selectedGroups = new Set(kept);
+    ddGroup.setSelected(kept, { silent: true });
+  }
+}
 
-    function passesNonGroupFilters(p) {
-      const cat = els.category.value;
-      const regionsSel = [...effectiveRegions()];
-      const provincesSel = [...state.selectedProvinces];
-      const citiesSel = [...state.selectedCities];
-      const servicesSel = [...state.selectedServices];
+function applyFilters() {
+  cluster.clearLayers();
 
-      if (cat && p.establishment_category !== cat) return false;
+  let visible = 0;
+  state.visibleItems = [];
 
-      const code = provCode(p);
-      const reg = provRegion(code);
-      const city = (p.address_city || "").trim();
+  for (const it of state.items) {
+    if (!passesNonGroupFilters(it)) continue;
+    if (state.selectedGroups.size > 0 && !state.selectedGroups.has(it.group)) continue;
 
-      if (regionsSel.length > 0 && !regionsSel.includes(reg)) return false;
-      if (provincesSel.length > 0 && !provincesSel.includes(code)) return false;
-      if (citiesSel.length > 0 && !citiesSel.includes(city)) return false;
+    cluster.addLayer(it.marker);
+    state.visibleItems.push(it);
+    visible += 1;
+  }
 
-      if (servicesSel.length > 0) {
-        const itemServices = (p.services || "")
-          .split(",")
-          .map(s => s.trim())
-          .filter(Boolean);
-
-        if (!servicesSel.some(s => itemServices.includes(s))) return false;
-      }
-
-      return true;
-    }
-
-    function syncGroups() {
-      if (!state.items.length) return;
-
-      const cat = els.category.value;
-      const hasNonGroup =
-        !!cat ||
-        state.selectedServices.size > 0 ||
-        effectiveRegions().size > 0 ||
-        state.selectedProvinces.size > 0 ||
-        state.selectedCities.size > 0;
-
-      const available = new Set();
-
-      for (const it of state.items) {
-        const p = it.feature.properties || {};
-        if (!passesNonGroupFilters(p)) continue;
-        available.add(groupValue(p));
-      }
-
-      const availArr = [...available].sort((a, b) => a.localeCompare(b, "it"));
-      ddGroup.setValues(availArr);
-
-      if (!state.groupsTouched) {
-        if (!hasNonGroup) {
-          state.selectedGroups.clear();
-          ddGroup.setSelected([], { silent: true });
-        } else {
-          state.selectedGroups = new Set(availArr);
-          ddGroup.setSelected(availArr, { silent: true });
-        }
-      } else {
-        const kept = availArr.filter(g => state.selectedGroups.has(g));
-        state.selectedGroups = new Set(kept);
-        ddGroup.setSelected(kept, { silent: true });
-      }
-    }
-
-    function applyFilters() {
-      cluster.clearLayers();
-
-      let visible = 0;
-
-      for (const it of state.items) {
-        const p = it.feature.properties || {};
-
-        if (!passesNonGroupFilters(p)) continue;
-
-        const g = groupValue(p);
-        if (state.selectedGroups.size > 0 && !state.selectedGroups.has(g)) continue;
-
-        cluster.addLayer(it.marker);
-        visible += 1;
-      }
-
-      els.kpiVisible.textContent = visible.toLocaleString("it-IT");
-    }
+  els.kpiVisible.textContent = visible.toLocaleString("it-IT");
+}
 
     function resetAll() {
       els.category.value = "";
@@ -588,7 +560,7 @@ els.nearbyList.innerHTML = `
       els.address.value = "";
       setStatus("");
 
-      if (state.geojson?.features) rebuildFilters(state.geojson.features);
+      if (state.geojson?.features) rebuildFilters();
       if (state.initialBounds) map.fitBounds(state.initialBounds);
 
       syncGroups();
@@ -881,22 +853,9 @@ function haversineKm(lat1, lon1, lat2, lon2) {
 }
 
 function getNearbyLocations(lat, lon, radiusKm) {
-  return state.items
-    .filter((it) => {
-      const p = it.feature.properties || {};
-
-      if (!passesNonGroupFilters(p)) return false;
-
-      const g = groupValue(p);
-      if (state.selectedGroups.size > 0 && !state.selectedGroups.has(g)) {
-        return false;
-      }
-
-      return true;
-    })
+  return (state.visibleItems || [])
     .map((it) => {
-      const [itemLng, itemLat] = it.feature.geometry.coordinates;
-      const distanceKm = haversineKm(lat, lon, itemLat, itemLng);
+      const distanceKm = haversineKm(lat, lon, it.lat, it.lng);
 
       return {
         item: it,
@@ -976,26 +935,44 @@ function renderNearbyLocations(lat, lon) {
 
       els.kpiTotal.textContent = geojson.features.length.toLocaleString("it-IT");
 
-     state.items = geojson.features.map((f) => {
+state.items = geojson.features.map((f) => {
+  const p = f.properties || {};
 
-  if (f.properties?.address_city) {
-    const c = f.properties.address_city.trim().toLowerCase();
-    f.properties.address_city = c.charAt(0).toUpperCase() + c.slice(1);
-  }
+  p.address_city = normalizeCityName(p.address_city || "");
+
+  const province = (p.address_district || "").toUpperCase().trim();
+  const region = window.PROVINCE_INFO?.[province]?.region || "";
+  const city = p.address_city || "";
+  const group = (p.group_name || "").toString().trim() || "Indipendenti";
+  const category = p.establishment_category || "";
+  const services = (p.services || "")
+    .split(",")
+    .map(s => s.trim())
+    .filter(Boolean);
 
   const [lng, lat] = f.geometry.coordinates;
 
-  const marker = L.marker([lat, lng])
-    .bindPopup(popupHtml(f.properties || {}));
+  const marker = L.marker([lat, lng]).bindPopup(popupHtml(p));
 
-  return { feature: f, marker };
+  return {
+    feature: f,
+    marker,
+    lat,
+    lng,
+    city,
+    province,
+    region,
+    group,
+    category,
+    services
+  };
 });
 
       const bounds = L.latLngBounds(state.items.map(x => x.marker.getLatLng())).pad(0.08);
       state.initialBounds = bounds;
       map.fitBounds(bounds);
 
-      rebuildFilters(geojson.features);
+      rebuildFilters();
       syncGroups();
       applyFilters();
      refreshNearbyListIfPossible();
