@@ -25,6 +25,7 @@ const map = L.map("map", {
       kpiVisible: document.getElementById("kpi-visible"),
       kpiTotal: document.getElementById("kpi-total"),
       ddGroup: document.getElementById("dd-group"),
+      ddStatus: document.getElementById("dd-status"),
       ddService: document.getElementById("dd-service"),
       ddRegion: document.getElementById("dd-region"),
       ddProvince: document.getElementById("dd-province"),
@@ -45,6 +46,7 @@ const state = {
   visibleItems: [],
   initialBounds: null,
   selectedGroups: new Set(),
+  selectedStatuses: new Set(),
   selectedServices: new Set(),
   manualRegions: new Set(),
   derivedRegions: new Set(),
@@ -113,12 +115,15 @@ function recomputeDerivedRegions() {
           .replaceAll(">", "&gt;");
 
       const name = esc(p.name || "Esercente");
-      const cat = p.establishment_category
-        ? `<div><strong>Categoria:</strong> ${esc(p.establishment_category)}</div>`
-        : "";
-      const services = p.services
-        ? `<div><strong>Servizi:</strong> ${esc(p.services)}</div>`
-        : "";
+     const cat = p.establishment_category
+  ? `<div><strong>Categoria:</strong> ${esc(p.establishment_category)}</div>`
+  : "";
+const status = p.status
+  ? `<div><strong>Status:</strong> ${esc(p.status)}</div>`
+  : "";
+const services = p.services
+  ? `<div><strong>Servizi:</strong> ${esc(p.services)}</div>`
+  : "";
       const addrParts = [
         p.address_line_1,
         p.address_zipcode,
@@ -137,6 +142,7 @@ function recomputeDerivedRegions() {
         <div style="min-width:240px">
           <div style="font-weight:800;margin-bottom:6px;">${name}</div>
           ${cat}
+          ${status}
           ${services}
           ${address}
           ${group}
@@ -290,6 +296,16 @@ function recomputeDerivedRegions() {
       },
     });
 
+const ddStatus = createCheckboxDropdown(els.ddStatus, {
+  placeholder: "Tutti gli status",
+  onChange: (arr) => {
+    state.selectedStatuses = new Set(arr);
+    syncGroups();
+    applyFilters();
+    refreshNearbyListIfPossible();
+  },
+});
+
     const ddService = createCheckboxDropdown(els.ddService, {
       placeholder: "Tutti i servizi",
       onChange: (arr) => {
@@ -419,6 +435,7 @@ function computeGeoOptions() {
 
 function rebuildFilters() {
   const cats = new Set();
+  const statuses = new Set();
   const services = new Set();
   const groups = new Set();
   const regionsAll = new Set();
@@ -427,6 +444,7 @@ function rebuildFilters() {
 
   for (const it of state.items) {
     if (it.category) cats.add(it.category);
+    if (it.status) statuses.add(it.status);
     if (it.group) groups.add(it.group);
     if (it.region) regionsAll.add(it.region);
     if (it.province) provincesAll.add(it.province);
@@ -436,6 +454,7 @@ function rebuildFilters() {
   }
 
   buildSingleSelect(els.category, cats, "Tutte");
+  ddStatus.setValues(statuses);
   ddService.setValues(services);
   ddRegion.setValues(regionsAll);
   ddProvince.setValues(provincesAll);
@@ -443,10 +462,12 @@ function rebuildFilters() {
   ddGroup.setValues(groups);
 
   ddGroup.setSelected([], { silent: true });
+  ddStatus.setSelected([], { silent: true });
   ddRegion.setSelected([], { silent: true });
   ddProvince.setSelected([], { silent: true });
   ddCity.setSelected([], { silent: true });
 
+  state.selectedStatuses.clear();
   state.selectedServices.clear();
   state.manualRegions.clear();
   state.derivedRegions.clear();
@@ -458,14 +479,16 @@ function rebuildFilters() {
   cascadeGeoOptions();
 }
 
-    function passesNonGroupFilters(it) {
+function passesNonGroupFilters(it) {
   const cat = els.category.value;
+  const statusesSel = [...state.selectedStatuses];
   const regionsSel = [...effectiveRegions()];
   const provincesSel = [...state.selectedProvinces];
   const citiesSel = [...state.selectedCities];
   const servicesSel = [...state.selectedServices];
 
   if (cat && it.category !== cat) return false;
+  if (statusesSel.length > 0 && !statusesSel.includes(it.status)) return false;
   if (regionsSel.length > 0 && !regionsSel.includes(it.region)) return false;
   if (provincesSel.length > 0 && !provincesSel.includes(it.province)) return false;
   if (citiesSel.length > 0 && !citiesSel.includes(it.city)) return false;
@@ -481,11 +504,12 @@ function syncGroups() {
 
   const cat = els.category.value;
   const hasNonGroup =
-    !!cat ||
-    state.selectedServices.size > 0 ||
-    effectiveRegions().size > 0 ||
-    state.selectedProvinces.size > 0 ||
-    state.selectedCities.size > 0;
+  !!cat ||
+  state.selectedStatuses.size > 0 ||
+  state.selectedServices.size > 0 ||
+  effectiveRegions().size > 0 ||
+  state.selectedProvinces.size > 0 ||
+  state.selectedCities.size > 0;
 
   const available = new Set();
 
@@ -534,12 +558,14 @@ function applyFilters() {
       els.category.value = "";
 
       ddGroup.clear({ silent: true });
+      ddStatus.clear({ silent: true });
       ddService.clear({ silent: true });
       ddRegion.clear({ silent: true });
       ddProvince.clear({ silent: true });
       ddCity.clear({ silent: true });
 
       state.selectedGroups.clear();
+      state.selectedStatuses.clear();
       state.selectedServices.clear();
       state.manualRegions.clear();
       state.derivedRegions.clear();
@@ -898,15 +924,17 @@ function renderNearbyLocations(lat, lon) {
     const group = escapeHtml(groupValue(p));
     const city = escapeHtml(p.address_city || "");
     const category = escapeHtml(p.establishment_category || "");
+    const status = escapeHtml(p.status || "");
 
     return `
       <div class="nearby-item" data-nearby-index="${index}">
         <div class="nearby-name">${name}</div>
-        <div class="nearby-meta">
-          ${category ? `<div><strong>Categoria:</strong> ${category}</div>` : ""}
-          <div><strong>Gruppo:</strong> ${group}</div>
-          ${city ? `<div><strong>Città:</strong> ${city}</div>` : ""}
-        </div>
+       <div class="nearby-meta">
+  ${category ? `<div><strong>Categoria:</strong> ${category}</div>` : ""}
+  ${status ? `<div><strong>Status:</strong> ${status}</div>` : ""}
+  <div><strong>Gruppo:</strong> ${group}</div>
+  ${city ? `<div><strong>Città:</strong> ${city}</div>` : ""}
+</div>
         <span class="nearby-distance">${distanceKm.toFixed(2)} km</span>
       </div>
     `;
@@ -946,27 +974,29 @@ state.items = geojson.features.map((f) => {
   const city = p.address_city || "";
   const group = (p.group_name || "").toString().trim() || "Indipendenti";
   const category = p.establishment_category || "";
+  const status = (p.status || "").toString().trim();
   const services = (p.services || "")
-    .split(",")
-    .map(s => s.trim())
-    .filter(Boolean);
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean);
 
   const [lng, lat] = f.geometry.coordinates;
 
   const marker = L.marker([lat, lng]).bindPopup(popupHtml(p));
 
   return {
-    feature: f,
-    marker,
-    lat,
-    lng,
-    city,
-    province,
-    region,
-    group,
-    category,
-    services
-  };
+  feature: f,
+  marker,
+  lat,
+  lng,
+  city,
+  province,
+  region,
+  group,
+  category,
+  status,
+  services
+};
 });
 
       const bounds = L.latLngBounds(state.items.map(x => x.marker.getLatLng())).pad(0.08);
