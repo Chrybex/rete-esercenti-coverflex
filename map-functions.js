@@ -843,7 +843,7 @@ function applyAddressToFilters(item) {
   setStatus("Indirizzo trovato.");
 }
 
-   async function fetchAddresses(query, limit = AUTOCOMPLETE_LIMIT) {
+  async function fetchAddresses(query, limit = AUTOCOMPLETE_LIMIT) {
   const normalizedQuery = normalizeSearchQuery(query);
   const cacheKey = buildAutocompleteCacheKey(normalizedQuery, limit);
 
@@ -860,7 +860,6 @@ function applyAddressToFilters(item) {
   const url = new URL("https://photon.komoot.io/api");
   url.searchParams.set("q", normalizedQuery + " Italia");
   url.searchParams.set("limit", String(limit));
-  url.searchParams.set("lang", "en");
 
   const response = await fetch(url.toString(), {
     headers: {
