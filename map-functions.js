@@ -13,11 +13,20 @@ const map = L.map("map", {
     });
     cluster.addTo(map);
 
-    let searchMarker = null;
-    let debounceTimer = null;
-    let activeIndex = -1;
-    let currentResults = [];
-    let lastRequestId = 0;
+let searchMarker = null;
+let debounceTimer = null;
+let activeIndex = -1;
+let currentResults = [];
+let lastRequestId = 0;
+
+const MIN_CHARS_FOR_AUTOCOMPLETE = 6;
+const AUTOCOMPLETE_DEBOUNCE_MS = 900;
+const AUTOCOMPLETE_LIMIT = 5;
+const DIRECT_SEARCH_LIMIT = 5;
+
+let autocompleteAbortController = null;
+let lastAutocompleteQuery = "";
+const autocompleteCache = new Map();
 
     const els = {
       category: document.getElementById("category"),
@@ -58,6 +67,18 @@ const state = {
 };
 
     const norm = (s) => (s ?? "").toString().trim().toLowerCase();
+
+function normalizeSearchQuery(query) {
+  return String(query || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+}
+
+function buildAutocompleteCacheKey(query, limit) {
+  return `${normalizeSearchQuery(query)}|${limit}`;
+}
+
 function normalizeCityName(name) {
   const s = (name ?? "").toString().trim().toLowerCase();
   if (!s) return "";
@@ -581,10 +602,13 @@ els.nearbyList.innerHTML = `
   </div>
 `;
 
-      clearSearchResults();
-      clearSearchMarker();
-      els.address.value = "";
-      setStatus("");
+     clearSearchResults();
+clearSearchMarker();
+els.address.value = "";
+setStatus("");
+
+lastAutocompleteQuery = "";
+autocompleteCache.clear();
 
       if (state.geojson?.features) rebuildFilters();
       if (state.initialBounds) map.fitBounds(state.initialBounds);
@@ -668,17 +692,17 @@ function setSearchMarker(lat, lon, label) {
   }
 }
 
-    function buildPrimary(item) {
-      const address = item.address || {};
-      const road = address.road || address.pedestrian || address.footway || address.cycleway || "";
-      const number = address.house_number || "";
-      const village = address.city || address.town || address.village || address.hamlet || "";
+function buildPrimary(item) {
+  const address = item.address || {};
+  const road = address.road || "";
+  const number = address.house_number || "";
+  const city = address.city || "";
 
-      if (road && number) return `${road} ${number}`;
-      if (road) return road;
-      if (village) return village;
-      return item.display_name || "Risultato";
-    }
+  if (road && number) return `${road} ${number}`;
+  if (road) return road;
+  if (city) return city;
+  return item.display_name || "Risultato";
+}
 
     function buildSecondary(item) {
       const address = item.address || {};
@@ -694,8 +718,16 @@ function setSearchMarker(lat, lon, label) {
     }
 
     function renderAddressResults(results) {
-      els.results.innerHTML = "";
-      currentResults = results;
+  els.results.innerHTML = "";
+
+  const seen = new Set();
+  currentResults = (results || []).filter((item) => {
+    const key = String(item.display_name || "").trim().toLowerCase();
+    if (!key) return false;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 
       if (!results.length) {
         els.results.innerHTML = `<li class="result-empty">Nessun risultato trovato in Italia</li>`;
@@ -811,30 +843,82 @@ function applyAddressToFilters(item) {
   setStatus("Indirizzo trovato.");
 }
 
-    async function fetchAddresses(query, limit = 5) {
-  const url =
-    `https://nominatim.openstreetmap.org/search?` +
-    `format=jsonv2&` +
-    `addressdetails=1&` +
-    `countrycodes=it&` +
-    `accept-language=it&` +
-    `limit=${limit}&` +
-    `dedupe=1&` +
-    `q=${encodeURIComponent(query)}`;
+   async function fetchAddresses(query, limit = AUTOCOMPLETE_LIMIT) {
+  const normalizedQuery = normalizeSearchQuery(query);
+  const cacheKey = buildAutocompleteCacheKey(normalizedQuery, limit);
 
-  const response = await fetch(url, {
+  if (autocompleteCache.has(cacheKey)) {
+    return autocompleteCache.get(cacheKey);
+  }
+
+  if (autocompleteAbortController) {
+    autocompleteAbortController.abort();
+  }
+
+  autocompleteAbortController = new AbortController();
+
+  const url = new URL("https://photon.komoot.io/api");
+  url.searchParams.set("q", normalizedQuery + " Italia");
+  url.searchParams.set("limit", String(limit));
+  url.searchParams.set("lang", "it");
+
+  const response = await fetch(url.toString(), {
     headers: {
-      "Accept": "application/json",
-      "Accept-Language": "it"
-    }
+      "Accept": "application/json"
+    },
+    signal: autocompleteAbortController.signal
   });
 
   if (!response.ok) {
-    throw new Error("Errore HTTP " + response.status);
+    const txt = await response.text().catch(() => "");
+    throw new Error("Errore Photon: " + response.status + " " + txt);
   }
 
-  return response.json();
+  const data = await response.json();
+  const features = Array.isArray(data.features) ? data.features : [];
+
+  const italianResults = features
+    .filter((feature) => {
+      const p = feature.properties || {};
+      return String(p.countrycode || "").toUpperCase() === "IT";
+    })
+    .map((feature) => {
+      const p = feature.properties || {};
+      const coords = (feature.geometry && feature.geometry.coordinates) || [];
+      const lon = Number(coords[0]);
+      const lat = Number(coords[1]);
+
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+
+      return {
+        lat,
+        lon,
+        display_name: [
+          p.name,
+          p.street,
+          p.housenumber,
+          p.postcode,
+          p.city,
+          p.state,
+          p.country
+        ].filter(Boolean).join(", "),
+        address: {
+          road: p.street || "",
+          house_number: p.housenumber || "",
+          postcode: p.postcode || "",
+          city: p.city || p.locality || p.county || "",
+          county: p.county || "",
+          state: p.state || "",
+          country: p.country || "Italia"
+        }
+      };
+    })
+    .filter(Boolean);
+
+  autocompleteCache.set(cacheKey, italianResults);
+  return italianResults;
 }
+
     async function searchAddress() {
       const query = els.address.value.trim();
 
@@ -847,8 +931,8 @@ function applyAddressToFilters(item) {
       setStatus("Ricerca in corso...");
 
       try {
-        const results = await fetchAddresses(query, 1);
-
+const results = await fetchAddresses(query, DIRECT_SEARCH_LIMIT);
+        
         if (!results.length) {
           setStatus("Nessun indirizzo trovato in Italia.");
           clearSearchResults();
@@ -1020,7 +1104,11 @@ state.items = geojson.features.map((f) => {
       resetAll();
     });
 
-    els.searchBtn.addEventListener("click", searchAddress);
+   els.searchBtn.addEventListener("click", () => {
+  clearTimeout(debounceTimer);
+  lastAutocompleteQuery = "";
+  searchAddress();
+});
 els.nearbyRadius.addEventListener("change", () => {
   if (
     Number.isFinite(state.lastSearchLat) &&
@@ -1030,36 +1118,56 @@ els.nearbyRadius.addEventListener("change", () => {
   }
 });
 
-    els.address.addEventListener("input", () => {
-      const query = els.address.value.trim();
-      clearTimeout(debounceTimer);
+els.address.addEventListener("input", () => {
+  const query = els.address.value.trim();
+  const normalizedQuery = normalizeSearchQuery(query);
 
-      if (query.length < 3) {
-        clearSearchResults();
-        setStatus("");
-        return;
-      }
+  clearTimeout(debounceTimer);
 
-      debounceTimer = setTimeout(async () => {
-        const requestId = ++lastRequestId;
+  if (normalizedQuery.length < MIN_CHARS_FOR_AUTOCOMPLETE) {
+    clearSearchResults();
+    setStatus("Scrivi almeno " + MIN_CHARS_FOR_AUTOCOMPLETE + " caratteri.");
+    lastAutocompleteQuery = "";
+    return;
+  }
 
-        try {
-          const results = await fetchAddresses(query, 6);
+  if (normalizedQuery === lastAutocompleteQuery) {
+    return;
+  }
 
-          if (requestId !== lastRequestId) return;
+  setStatus("Attendo una pausa di scrittura...");
 
-          renderAddressResults(results);
-          setStatus(results.length ? "Seleziona un risultato." : "Nessun risultato trovato in Italia.");
-        } catch (error) {
-          console.error(error);
+  debounceTimer = setTimeout(async () => {
+    if (normalizedQuery === lastAutocompleteQuery) {
+      return;
+    }
 
-          if (requestId !== lastRequestId) return;
+    lastAutocompleteQuery = normalizedQuery;
+    const requestId = ++lastRequestId;
 
-          clearSearchResults();
-          setStatus("Errore durante l'autocomplete.");
-        }
-      }, 300);
-    });
+    try {
+      const results = await fetchAddresses(normalizedQuery, AUTOCOMPLETE_LIMIT);
+
+      if (requestId !== lastRequestId) return;
+
+      renderAddressResults(results);
+      setStatus(
+        results.length
+          ? results.length + " suggerimento/i trovati."
+          : "Nessun risultato trovato in Italia."
+      );
+    } catch (error) {
+      if (error.name === "AbortError") return;
+
+      console.error(error);
+
+      if (requestId !== lastRequestId) return;
+
+      clearSearchResults();
+      setStatus(error.message || "Errore durante l'autocomplete.");
+    }
+  }, AUTOCOMPLETE_DEBOUNCE_MS);
+});
 
     els.address.addEventListener("keydown", (e) => {
       const hasResults = currentResults.length > 0;
@@ -1071,14 +1179,16 @@ els.nearbyRadius.addEventListener("change", () => {
         e.preventDefault();
         setActiveResult(Math.max(activeIndex - 1, 0));
       } else if (e.key === "Enter") {
-        e.preventDefault();
+  e.preventDefault();
+  clearTimeout(debounceTimer);
+  lastAutocompleteQuery = "";
 
-        if (hasResults && activeIndex >= 0) {
-          chooseAddressResult(activeIndex);
-        } else {
-          searchAddress();
-        }
-      } else if (e.key === "Escape") {
+  if (hasResults && activeIndex >= 0) {
+    chooseAddressResult(activeIndex);
+  } else {
+    searchAddress();
+  }
+} else if (e.key === "Escape") {
         e.preventDefault();
         clearSearchResults();
       }
