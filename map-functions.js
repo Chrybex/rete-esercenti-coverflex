@@ -860,7 +860,7 @@ function applyAddressToFilters(item) {
   const url = new URL("https://photon.komoot.io/api");
   url.searchParams.set("q", normalizedQuery + " Italia");
   url.searchParams.set("limit", String(limit));
-  url.searchParams.set("lang", "it");
+  url.searchParams.set("lang", "en");
 
   const response = await fetch(url.toString(), {
     headers: {
