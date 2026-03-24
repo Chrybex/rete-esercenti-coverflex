@@ -20,7 +20,7 @@ let currentResults = [];
 let lastRequestId = 0;
 
 const MIN_CHARS_FOR_AUTOCOMPLETE = 6;
-const AUTOCOMPLETE_DEBOUNCE_MS = 900;
+const AUTOCOMPLETE_DEBOUNCE_MS = 1500;
 const AUTOCOMPLETE_LIMIT = 5;
 const DIRECT_SEARCH_LIMIT = 5;
 
@@ -1197,6 +1197,9 @@ els.address.addEventListener("input", () => {
     }
   }, AUTOCOMPLETE_DEBOUNCE_MS);
 });
+
+
+
 
     els.address.addEventListener("keydown", (e) => {
       const hasResults = currentResults.length > 0;
