@@ -717,53 +717,84 @@ function buildPrimary(item) {
       return parts.join(", ");
     }
 
-    function renderAddressResults(results) {
+  function renderAddressResults(results) {
   els.results.innerHTML = "";
 
   const seen = new Set();
-  currentResults = (results || []).filter((item) => {
-    const key = String(item.display_name || "").trim().toLowerCase();
+  currentResults = (results || []).filter((feature) => {
+    const p = feature.properties || {};
+    const key = [
+      p.name || "",
+      p.street || "",
+      p.housenumber || "",
+      p.postcode || "",
+      p.city || "",
+      p.state || ""
+    ].join("|").toLowerCase().trim();
+
     if (!key) return false;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   });
 
-      if (!results.length) {
-        els.results.innerHTML = `<li class="result-empty">Nessun risultato trovato in Italia</li>`;
-        showSearchResults();
-        return;
-      }
+  if (!currentResults.length) {
+    els.results.innerHTML = `<li class="result-empty">Nessun risultato trovato in Italia</li>`;
+    showSearchResults();
+    return;
+  }
 
-      results.forEach((item, index) => {
-        const li = document.createElement("li");
-        li.setAttribute("role", "option");
-        li.setAttribute("data-index", String(index));
+  currentResults.forEach((feature, index) => {
+    const p = feature.properties || {};
+    const li = document.createElement("li");
+    li.setAttribute("role", "option");
+    li.setAttribute("data-index", String(index));
 
-        const primary = buildPrimary(item);
-        const secondary = buildSecondary(item);
+    const primary = buildPhotonPrimary(p);
+    const secondary = buildPhotonSecondary(p);
 
-        li.innerHTML = `
-          <span class="result-title">${escapeHtml(primary)}</span>
-          <span class="result-subtitle">${escapeHtml(secondary || item.display_name || "")}</span>
-        `;
+    li.innerHTML = `
+      <span class="result-title">${escapeHtml(primary)}</span>
+      <span class="result-subtitle">${escapeHtml(secondary || "Italia")}</span>
+    `;
 
-        li.addEventListener("mouseenter", () => setActiveResult(index));
-        li.addEventListener("mousedown", (e) => {
-          e.preventDefault();
-          chooseAddressResult(index);
-        });
+    li.addEventListener("mouseenter", () => setActiveResult(index));
+    li.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      chooseAddressResult(index);
+    });
 
-        els.results.appendChild(li);
-      });
+    els.results.appendChild(li);
+  });
 
-      showSearchResults();
-      setActiveResult(0);
-    }
+  showSearchResults();
+  setActiveResult(0);
+}
+
+function buildPhotonPrimary(props) {
+  const main = [
+    props.name || props.street || "Risultato",
+    props.housenumber || ""
+  ].filter(Boolean).join(" ");
+
+  return main || "Risultato";
+}
+
+function buildPhotonSecondary(props) {
+  const city = props.city || props.town || props.village || props.county || "";
+
+  return [
+    props.street || "",
+    props.postcode || "",
+    city
+  ].filter(Boolean).join(", ");
+}
 
 function chooseAddressResult(index) {
-  const item = currentResults[index];
-  if (!item) return;
+  const feature = currentResults[index];
+  if (!feature) return;
+
+  const item = mapPhotonFeatureToAddressItem(feature);
   chooseDirectAddress(item);
 }
 
@@ -860,7 +891,6 @@ async function fetchAddresses(query, limit = AUTOCOMPLETE_LIMIT) {
   const url = new URL("https://photon.komoot.io/api");
   url.searchParams.set("q", normalizedQuery + " Italia");
   url.searchParams.set("limit", String(limit));
-  url.searchParams.set("lang", "en");
 
   const response = await fetch(url.toString(), {
     headers: {
@@ -877,46 +907,44 @@ async function fetchAddresses(query, limit = AUTOCOMPLETE_LIMIT) {
   const data = await response.json();
   const features = Array.isArray(data.features) ? data.features : [];
 
-  const italianResults = features
-    .filter((feature) => {
-      const p = feature.properties || {};
-      return String(p.countrycode || "").toUpperCase() === "IT";
-    })
-    .map((feature) => {
-      const p = feature.properties || {};
-      const coords = (feature.geometry && feature.geometry.coordinates) || [];
-      const lon = Number(coords[0]);
-      const lat = Number(coords[1]);
-
-      if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
-
-      return {
-        lat,
-        lon,
-        display_name: [
-          p.name,
-          p.street,
-          p.housenumber,
-          p.postcode,
-          p.city,
-          p.state,
-          p.country
-        ].filter(Boolean).join(", "),
-        address: {
-          road: p.street || "",
-          house_number: p.housenumber || "",
-          postcode: p.postcode || "",
-          city: p.city || p.locality || p.county || "",
-          county: p.county || "",
-          state: p.state || "",
-          country: p.country || "Italia"
-        }
-      };
-    })
-    .filter(Boolean);
+  const italianResults = features.filter((feature) => {
+    const p = feature.properties || {};
+    return String(p.countrycode || "").toUpperCase() === "IT";
+  });
 
   autocompleteCache.set(cacheKey, italianResults);
   return italianResults;
+}
+
+function mapPhotonFeatureToAddressItem(feature) {
+  const p = feature.properties || {};
+  const coords = (feature.geometry && feature.geometry.coordinates) || [];
+  const lon = Number(coords[0]);
+  const lat = Number(coords[1]);
+
+  return {
+    lat,
+    lon,
+    display_name: [
+      p.name,
+      p.street,
+      p.housenumber,
+      p.postcode,
+      p.city,
+      p.state,
+      p.country
+    ].filter(Boolean).join(", "),
+    address: {
+      road: p.street || "",
+      house_number: p.housenumber || "",
+      postcode: p.postcode || "",
+      city: p.city || p.locality || p.county || "",
+      county: p.county || "",
+      state: p.state || "",
+      country: p.country || "Italia"
+    },
+    __feature: feature
+  };
 }
 
     async function searchAddress() {
@@ -932,14 +960,15 @@ async function fetchAddresses(query, limit = AUTOCOMPLETE_LIMIT) {
 
       try {
 const results = await fetchAddresses(query, DIRECT_SEARCH_LIMIT);
-        
-        if (!results.length) {
-          setStatus("Nessun indirizzo trovato in Italia.");
-          clearSearchResults();
-          return;
-        }
 
-        chooseDirectAddress(results[0]);
+if (!results.length) {
+  setStatus("Nessun indirizzo trovato in Italia.");
+  clearSearchResults();
+  return;
+}
+
+const firstItem = mapPhotonFeatureToAddressItem(results[0]);
+chooseDirectAddress(firstItem);
       } catch (error) {
         console.error(error);
         setStatus("Errore durante la ricerca.");
